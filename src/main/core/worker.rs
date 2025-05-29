@@ -367,7 +367,31 @@ impl Worker {
             return;
         }
 
-        let delay = Worker::with(|w| w.shared.latency(src_ip, dst_ip).unwrap()).unwrap();
+        let base_delay = Worker::with(|w| w.shared.latency(src_ip, dst_ip).unwrap()).unwrap();
+        let jitter_std_dev = Worker::with(|w| w.shared.jitter(src_ip, dst_ip).unwrap()).unwrap();
+
+        // Apply jitter as a normal distribution delay with jitter as standard deviation
+        let delay = if jitter_std_dev > 0.0 {
+            // Generate a normal distribution sample using Box-Muller transform
+            let mut rng = src_host.random_mut();
+            let u1: f64 = rng.random();
+            let u2: f64 = rng.random();
+
+            // Box-Muller transform to generate standard normal (mean=0, std=1)
+            let z0 = (-2.0 * u1.ln()).sqrt() * (2.0 * std::f64::consts::PI * u2).cos();
+
+            // Scale by our standard deviation
+            let normal_sample = z0 * jitter_std_dev;
+
+            let base_delay_ns = (base_delay.as_nanos() as f64) + normal_sample;
+            if base_delay_ns > 0.0 {
+                SimulationTime::from_nanos(base_delay_ns as u64)
+            } else {
+                SimulationTime::NANOSECOND
+            }
+        } else {
+            base_delay
+        };
 
         Worker::update_lowest_used_latency(delay);
         Worker::with(|w| w.shared.increment_packet_count(src_ip, dst_ip)).unwrap();
@@ -521,6 +545,15 @@ impl WorkerShared {
         Some(SimulationTime::from_nanos(
             self.routing_info.path(src, dst)?.latency_ns,
         ))
+    }
+
+    pub fn jitter(&self, src: std::net::IpAddr, dst: std::net::IpAddr) -> Option<f64> {
+        let src = self.ip_assignment.get_node(src)?;
+        let dst = self.ip_assignment.get_node(dst)?;
+
+        let jitter_variance = self.routing_info.path(src, dst)?.jitter_variance_ns2;
+        // We finish the RSS calculation here
+        Some(jitter_variance.sqrt())
     }
 
     pub fn reliability(&self, src: std::net::IpAddr, dst: std::net::IpAddr) -> Option<f32> {

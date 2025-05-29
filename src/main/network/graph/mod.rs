@@ -298,6 +298,8 @@ impl NetworkGraph {
 pub struct PathProperties {
     /// Latency in nanoseconds.
     pub latency_ns: u64,
+    /// Jitter variance in nanoseconds squared.
+    pub jitter_variance_ns2: f64,
     /// Packet loss as fraction.
     pub packet_loss: f32,
 }
@@ -323,8 +325,13 @@ impl core::ops::Add for PathProperties {
     type Output = Self;
 
     fn add(self, other: Self) -> Self::Output {
+        // Add jitter variances - we store variance and only sqrt when needed
+        // This is mathematically correct for independent random variables
+        // Calculate jitter using root sum of squares (RSS) at the end.
+        // Here we add variances (std deviation squared), at the end we'll sqrt this.
         Self {
             latency_ns: self.latency_ns + other.latency_ns,
+            jitter_variance_ns2: self.jitter_variance_ns2 + other.jitter_variance_ns2,
             packet_loss: 1f32 - (1f32 - self.packet_loss) * (1f32 - other.packet_loss),
         }
     }
@@ -332,8 +339,10 @@ impl core::ops::Add for PathProperties {
 
 impl std::convert::From<&ShadowEdge> for PathProperties {
     fn from(e: &ShadowEdge) -> Self {
+        let jitter_ns = e.jitter.convert(units::TimePrefix::Nano).unwrap().value() as f64;
         Self {
             latency_ns: e.latency.convert(units::TimePrefix::Nano).unwrap().value(),
+            jitter_variance_ns2: jitter_ns * jitter_ns, // Store variance (jitter squared)
             packet_loss: e.packet_loss,
         }
     }
@@ -465,10 +474,11 @@ impl<T: Eq + Hash + std::fmt::Display + Clone + Copy> RoutingInfo<T> {
         for ((start, end), count) in self.packet_counters.read().unwrap().iter() {
             let path = self.paths.get(&(*start, *end)).unwrap();
             log::debug!(
-                "Found path {}->{}: latency={}ns, packet_loss={}, packet_count={}",
+                "Found path {}->{}: latency={}ns, jitter_std_dev={}ns, packet_loss={}, packet_count={}",
                 start,
                 end,
                 path.latency_ns,
+                path.jitter_variance_ns2.sqrt(),
                 path.packet_loss,
                 count,
             );
@@ -520,15 +530,19 @@ mod tests {
     fn test_path_add() {
         let p1 = PathProperties {
             latency_ns: 23,
+            jitter_variance_ns2: 25.0, // 5^2
             packet_loss: 0.35,
         };
         let p2 = PathProperties {
             latency_ns: 11,
+            jitter_variance_ns2: 9.0, // 3^2
             packet_loss: 0.85,
         };
 
         let p3 = p1 + p2;
         assert_eq!(p3.latency_ns, 34);
+        // Jitter variance should be added: 25 + 9 = 34
+        assert_eq!(p3.jitter_variance_ns2, 34.0);
         assert!((p3.packet_loss - 0.9025).abs() < 0.01);
     }
 
@@ -659,5 +673,164 @@ mod tests {
             incremented,
             std::net::IpAddr::V4(std::net::Ipv4Addr::new(11, 0, 0, 255))
         );
+    }
+
+    #[test]
+    fn test_jitter_support() {
+        // Test that jitter is correctly parsed and stored in edges
+        let graph = r#"graph [
+            directed 0
+            node [
+                id 0
+            ]
+            node [
+                id 1
+            ]
+            edge [
+                source 0
+                target 0
+                latency "1 ms"
+                jitter "0 ms"
+                packet_loss 0.0
+            ]
+            edge [
+                source 1
+                target 1
+                latency "1 ms"
+                jitter "0 ms"
+                packet_loss 0.0
+            ]
+            edge [
+                source 0
+                target 1
+                latency "10 ms"
+                jitter "5 ms"
+                packet_loss 0.1
+            ]
+        ]"#;
+
+        let network_graph = NetworkGraph::parse(&graph).unwrap();
+        let node_0 = *network_graph.node_id_to_index(0).unwrap();
+        let node_1 = *network_graph.node_id_to_index(1).unwrap();
+
+        let shortest_paths = network_graph
+            .compute_shortest_paths(&[node_0, node_1])
+            .unwrap();
+
+        let path_props = shortest_paths.get(&(node_0, node_1)).unwrap();
+        assert_eq!(path_props.latency_ns, 10_000_000); // 10 ms in nanoseconds
+        assert_eq!(path_props.jitter_variance_ns2, 25_000_000_000_000.0); // 5 ms squared in nanoseconds squared
+        // Rounding to avoid floating point errors
+        assert_eq!((path_props.packet_loss * 100.0).round() / 100.0, 0.1);
+    }
+
+    #[test]
+    fn test_jitter_path_addition() {
+        // Test that jitter is correctly added when combining paths
+        let graph = r#"graph [
+            directed 0
+            node [
+                id 0
+            ]
+            node [
+                id 1
+            ]
+            node [
+                id 2
+            ]
+            edge [
+                source 0
+                target 0
+                latency "1 ms"
+                jitter "0 ms"
+                packet_loss 0.0
+            ]
+            edge [
+                source 1
+                target 1
+                latency "1 ms"
+                jitter "0 ms"
+                packet_loss 0.0
+            ]
+            edge [
+                source 2
+                target 2
+                latency "1 ms"
+                jitter "0 ms"
+                packet_loss 0.0
+            ]
+            edge [
+                source 0
+                target 1
+                latency "10 ms"
+                jitter "3 ms"
+                packet_loss 0.1
+            ]
+            edge [
+                source 1
+                target 2
+                latency "20 ms"
+                jitter "7 ms"
+                packet_loss 0.2
+            ]
+        ]"#;
+
+        let network_graph = NetworkGraph::parse(&graph).unwrap();
+        let node_0 = *network_graph.node_id_to_index(0).unwrap();
+        let node_1 = *network_graph.node_id_to_index(1).unwrap();
+        let node_2 = *network_graph.node_id_to_index(2).unwrap();
+
+        let shortest_paths = network_graph
+            .compute_shortest_paths(&[node_0, node_1, node_2])
+            .unwrap();
+
+        // Direct path from 0 to 1
+        let path_0_to_1 = shortest_paths.get(&(node_0, node_1)).unwrap();
+        assert_eq!(path_0_to_1.latency_ns, 10_000_000); // 10 ms
+        assert_eq!(path_0_to_1.jitter_variance_ns2, 9_000_000_000_000.0); // 3 ms squared
+
+        // Direct path from 1 to 2
+        let path_1_to_2 = shortest_paths.get(&(node_1, node_2)).unwrap();
+        assert_eq!(path_1_to_2.latency_ns, 20_000_000); // 20 ms
+        assert_eq!(path_1_to_2.jitter_variance_ns2, 49_000_000_000_000.0); // 7 ms squared
+
+        // Multi-hop path from 0 to 2 (should combine both edges)
+        let path_0_to_2 = shortest_paths.get(&(node_0, node_2)).unwrap();
+        assert_eq!(path_0_to_2.latency_ns, 30_000_000); // 10 + 20 ms
+
+        // Jitter variance should be added: 3^2 + 7^2 = 9 + 49 = 58
+        assert_eq!(path_0_to_2.jitter_variance_ns2, 58_000_000_000_000.0);
+
+        // Packet loss should be combined using the formula: 1 - (1 - p1) * (1 - p2)
+        let expected_packet_loss = 1.0 - (1.0 - 0.1) * (1.0 - 0.2);
+        assert!((path_0_to_2.packet_loss - expected_packet_loss).abs() < 0.001);
+    }
+
+    #[test]
+    fn test_zero_jitter() {
+        // Test that zero jitter works correctly
+        let graph = r#"graph [
+            directed 0
+            node [
+                id 0
+            ]
+            edge [
+                source 0
+                target 0
+                latency "100 ms"
+                jitter "0 ms"
+                packet_loss 0.0
+            ]
+        ]"#;
+
+        let network_graph = NetworkGraph::parse(&graph).unwrap();
+        let node_0 = *network_graph.node_id_to_index(0).unwrap();
+
+        let shortest_paths = network_graph.compute_shortest_paths(&[node_0]).unwrap();
+
+        let path_props = shortest_paths.get(&(node_0, node_0)).unwrap();
+        assert_eq!(path_props.latency_ns, 100_000_000); // 100 ms
+        assert_eq!(path_props.jitter_variance_ns2, 0.0); // 0 ms squared
+        assert_eq!(path_props.packet_loss, 0.0);
     }
 }
