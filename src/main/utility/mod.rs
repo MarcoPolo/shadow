@@ -418,8 +418,8 @@ fn verify_plugin_path_internal(
         if is_dynamic_bin(&path) {
             Ok(())
         } else {
-            log::debug!("{path:?} is ELF, but not dynamically linked");
-            Err(VerifyPluginPathError::NotDynamicallyLinkedElf)
+            log::warn!("Allowing statically linked ELF binary");
+            Ok(())
         }
     } else if let Some(interp) = get_interpreter(&buf) {
         // Looks like a script.

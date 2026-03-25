@@ -25,7 +25,7 @@ pub struct EmulatedTime(CEmulatedTime);
 pub type CEmulatedTime = u64;
 
 // Duplicated from the EMULATED_TIME_OFFSET macro in definitions.h.
-pub const SIMULATION_START_SEC: u64 = 946684800u64;
+pub const SIMULATION_START_SEC: u64 = 1773267943u64;
 pub const EMUTIME_INVALID: CEmulatedTime = u64::MAX;
 pub const EMUTIME_MAX: CEmulatedTime = u64::MAX - 1;
 pub const EMUTIME_MIN: CEmulatedTime = 0u64;
@@ -34,7 +34,7 @@ pub const EMUTIME_MIN: CEmulatedTime = 0u64;
 /// This is used to emulate to applications that we are in a recent time.
 // cbindgen won't do the constant propagation here. We use the static assertion below
 // to ensure this definition is equal to the intended canonical definition.
-pub const EMUTIME_SIMULATION_START: CEmulatedTime = 946684800u64 * 1_000_000_000u64;
+pub const EMUTIME_SIMULATION_START: CEmulatedTime = 1773267943u64 * 1_000_000_000u64;
 const _: () =
     assert!(EMUTIME_SIMULATION_START == SIMULATION_START_SEC * simulation_time::SIMTIME_ONE_SECOND);
 
