@@ -96,8 +96,9 @@ impl SyscallHandler {
         }
 
         if flags.contains(CloneFlags::CLONE_FS) {
-            // Currently a no-op since we don't support the related
-            // metadata and syscalls that this affects (e.g. chroot).
+            // Currently a no-op. We now support chroot and chdir, but
+            // CLONE_FS sharing of root_dir/working_dir across threads
+            // is not yet implemented.
             handled_flags.insert(CloneFlags::CLONE_FS);
         }
 

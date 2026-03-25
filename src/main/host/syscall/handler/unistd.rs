@@ -732,6 +732,26 @@ impl SyscallHandler {
             abs_path = path;
         }
 
+        // If the process has a chroot, prepend the root dir to the path so
+        // that Shadow's host-side file operations (verify_plugin_path,
+        // posix_spawn) resolve the binary inside the chroot.
+        let _chroot_path_storage: Option<CString>;
+        let abs_path = {
+            let root_dir = ctx.objs.process.root_dir();
+            let root_dir_bytes = root_dir.to_bytes();
+            if root_dir_bytes != b"/" {
+                let abs_path_bytes = abs_path.to_bytes_with_nul();
+                let mut tmp = Vec::with_capacity(root_dir_bytes.len() + abs_path_bytes.len());
+                tmp.extend(root_dir_bytes);
+                tmp.extend(abs_path_bytes);
+                _chroot_path_storage = Some(CString::from_vec_with_nul(tmp).unwrap());
+                _chroot_path_storage.as_ref().unwrap().as_c_str()
+            } else {
+                _chroot_path_storage = None;
+                abs_path
+            }
+        };
+
         // TODO: canonicalize? On one hand that would improve caching behavior
         // in `verify_plugin_path`; OTOH it does some redundant work with
         // `verify_plugin_path`. Ideal solution is probably to split up
@@ -986,6 +1006,30 @@ impl SyscallHandler {
         newcwd.push(0);
         let newcwd = CString::from_vec_with_nul(newcwd).unwrap();
         process.process.set_current_working_dir(newcwd);
+        Ok(())
+    }
+
+    log_syscall!(
+        chroot,
+        /* rv */ std::ffi::c_int,
+        /* path */ SyscallStringArg,
+    );
+    pub fn chroot(
+        ctx: &mut SyscallContext,
+        path: ForeignPtr<std::ffi::c_char>,
+    ) -> Result<(), SyscallError> {
+        // Execute the native chroot, propagating any failures.
+        let (process, thread) = ctx.objs.split_thread();
+        thread.native_chroot(&process, path)?;
+
+        // Update our internal copy of the root dir using /proc/<pid>/root.
+        let procpath = format!("/proc/{}/root", thread.native_tid().as_raw_nonzero().get());
+        let newroot = std::fs::read_link(&procpath)
+            .unwrap_or_else(|e| panic!("Couldn't find new root {procpath}: {e:?}"));
+        let mut newroot = newroot.into_os_string().into_vec();
+        newroot.push(0);
+        let newroot = CString::from_vec_with_nul(newroot).unwrap();
+        process.process.set_root_dir(newroot);
         Ok(())
     }
 }

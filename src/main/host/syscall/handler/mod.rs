@@ -377,6 +377,7 @@ impl SyscallHandler {
             SyscallNum::NR_capget => handle!(capget),
             SyscallNum::NR_capset => handle!(capset),
             SyscallNum::NR_chdir => handle!(chdir),
+            SyscallNum::NR_chroot => handle!(chroot),
             SyscallNum::NR_clock_getres => handle!(clock_getres),
             SyscallNum::NR_clock_nanosleep => handle!(clock_nanosleep),
             SyscallNum::NR_clone => handle!(clone),

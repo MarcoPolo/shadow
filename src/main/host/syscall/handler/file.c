@@ -60,21 +60,39 @@ static SyscallReturn _syscallhandler_openHelper(SyscallHandler* sys, UntypedFore
         return syscallreturn_makeDoneErrno(-errcode);
     }
 
+    /* If the process has a chroot, resolve the path to the host filesystem. */
+    char* resolved = NULL;
+    if (pathname && pathname[0] == '/') {
+        const char* rootDir = process_getRootDir(rustsyscallhandler_getProcess(sys));
+        if (rootDir && !(rootDir[0] == '/' && rootDir[1] == '\0')) {
+            size_t rootLen = strlen(rootDir);
+            /* Don't prepend if the path already starts with rootDir (e.g.
+             * shebang paths that the kernel already resolved to host paths). */
+            if (strncmp(pathname, rootDir, rootLen) != 0) {
+                if (asprintf(&resolved, "%s%s", rootDir, pathname) < 0) {
+                    abort();
+                }
+            }
+        }
+    }
+
     /* Create and open the file. */
     RegularFile* filed = regularfile_new();
-    errcode = regularfile_open(filed, pathname, flags & ~O_CLOEXEC, mode,
+    errcode = regularfile_open(filed, resolved ? resolved : pathname, flags & ~O_CLOEXEC, mode,
                                process_getWorkingDir(rustsyscallhandler_getProcess(sys)));
 
     if (errcode < 0) {
         /* This will unref/free the RegularFile. */
         legacyfile_close((LegacyFile*)filed, rustsyscallhandler_getHost(sys));
         legacyfile_unref(filed);
+        free(resolved);
         return syscallreturn_makeDoneErrno(-errcode);
     }
 
     utility_debugAssert(errcode == 0);
     Descriptor* desc = descriptor_fromLegacyFile((LegacyFile*)filed, flags & O_CLOEXEC);
     int handle = thread_registerDescriptor(rustsyscallhandler_getThread(sys), desc);
+    free(resolved);
     return syscallreturn_makeDoneI64(handle);
 }
 

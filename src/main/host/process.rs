@@ -165,6 +165,10 @@ struct Common {
     // See https://github.com/shadow/shadow/issues/2960
     working_dir: CString,
 
+    // absolute path to the process's root directory.
+    // This must remain in sync with the actual root dir of the native process.
+    root_dir: CString,
+
     // (emulated) Process-wide resource limits. We don't enforce these, but track
     // what they are so that we can return the expected value for e.g. `getrlimit`.
     rlimits: [linux_api::resource::rlimit64; linux_api::resource::RLIM_NLIMITS as usize],
@@ -622,6 +626,7 @@ impl RunnableProcess {
             name,
             plugin_name,
             working_dir: self.common.working_dir.clone(),
+            root_dir: self.common.root_dir.clone(),
             parent_pid: Cell::new(parent_pid),
             group_id: Cell::new(process_group_id),
             session_id: Cell::new(session_id),
@@ -1110,6 +1115,7 @@ impl Process {
             id: process_id,
             host_id: host.id(),
             working_dir,
+            root_dir: CString::new("/").unwrap(),
             name,
             plugin_name,
             parent_pid: Cell::new(ProcessId::INIT),
@@ -1748,6 +1754,17 @@ impl Process {
         self.common_mut().working_dir = path;
     }
 
+    pub fn root_dir(&self) -> impl Deref<Target = CString> + '_ {
+        Ref::map(self.common(), |common| &common.root_dir)
+    }
+
+    /// Set the process's root directory.
+    /// This must be kept in sync with the actual root dir of the native process.
+    // TODO: This ought to be at the thread level, to support `CLONE_FS`.
+    pub fn set_root_dir(&self, path: CString) {
+        self.common_mut().root_dir = path;
+    }
+
     /// Update `self` to complete an `exec` syscall from thread `tid`, replacing
     /// the running managed process with `mthread`.
     pub fn update_for_exec(&mut self, host: &Host, tid: ThreadId, mthread: ManagedThread) {
@@ -2255,6 +2272,12 @@ mod export {
     pub unsafe extern "C-unwind" fn process_getWorkingDir(proc: *const Process) -> *const c_char {
         let proc = unsafe { proc.as_ref().unwrap() };
         proc.common().working_dir.as_ptr()
+    }
+
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C-unwind" fn process_getRootDir(proc: *const Process) -> *const c_char {
+        let proc = unsafe { proc.as_ref().unwrap() };
+        proc.common().root_dir.as_ptr()
     }
 
     #[unsafe(no_mangle)]

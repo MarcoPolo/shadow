@@ -1,0 +1,5 @@
+include_directories(${GLIB_INCLUDE_DIRS})
+link_libraries(${GLIB_LIBRARIES})
+add_executable(test-chroot test_chroot.c)
+add_linux_tests(BASENAME chroot COMMAND test-chroot)
+add_shadow_tests(BASENAME chroot)

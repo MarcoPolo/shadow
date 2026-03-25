@@ -55,6 +55,32 @@ static int _syscallhandler_validateDirHelper(SyscallHandler* sys, int dirfd,
     return 0;
 }
 
+/* If the process has a non-"/" root directory (chroot), prepend it to the
+ * given absolute pathname so that host-side file operations resolve inside the
+ * chroot.  Returns a malloc'd string that the caller must free, or NULL if no
+ * translation was needed (in which case the original pointer is still valid). */
+static char* _chrootResolvePath(SyscallHandler* sys, const char* pathname) {
+    if (!pathname || pathname[0] != '/') {
+        return NULL; /* relative paths are resolved via workingDir, not affected */
+    }
+    const char* rootDir = process_getRootDir(rustsyscallhandler_getProcess(sys));
+    if (!rootDir || (rootDir[0] == '/' && rootDir[1] == '\0')) {
+        return NULL; /* no chroot or root is "/" */
+    }
+    /* If the path already starts with rootDir, it's already a host path
+     * (e.g. from shebang handling where the kernel passes the host-resolved
+     * script path to the interpreter). Don't prepend again. */
+    size_t rootLen = strlen(rootDir);
+    if (strncmp(pathname, rootDir, rootLen) == 0) {
+        return NULL;
+    }
+    char* resolved = NULL;
+    if (asprintf(&resolved, "%s%s", rootDir, pathname) < 0) {
+        abort();
+    }
+    return resolved;
+}
+
 static int _syscallhandler_validateDirAndPathnameHelper(SyscallHandler* sys, int dirfd,
                                                         UntypedForeignPtr pathnamePtr,
                                                         RegularFile** dir_desc_out,
@@ -94,10 +120,17 @@ static SyscallReturn _syscallhandler_renameatHelper(SyscallHandler* sys, int old
         return syscallreturn_makeDoneErrno(-errcode);
     }
 
+    char* resolvedOld = _chrootResolvePath(sys, oldpath);
+    char* resolvedNew = _chrootResolvePath(sys, newpath);
     const char* plugin_cwd = process_getWorkingDir(rustsyscallhandler_getProcess(sys));
 
-    return syscallreturn_makeDoneI64(
-        regularfile_renameat2(olddir_desc, oldpath, newdir_desc, newpath, flags, plugin_cwd));
+    SyscallReturn rv = syscallreturn_makeDoneI64(
+        regularfile_renameat2(olddir_desc, resolvedOld ? resolvedOld : oldpath,
+                              newdir_desc, resolvedNew ? resolvedNew : newpath,
+                              flags, plugin_cwd));
+    free(resolvedOld);
+    free(resolvedNew);
+    return rv;
 }
 
 ///////////////////////////////////////////////////////////
@@ -123,21 +156,26 @@ SyscallReturn syscallhandler_openat(SyscallHandler* sys, const SyscallArgs* args
         return syscallreturn_makeDoneErrno(-errcode);
     }
 
+    char* resolved = _chrootResolvePath(sys, pathname);
+
     /* Create and open the file. */
     RegularFile* file_desc = regularfile_new();
-    errcode = regularfile_openat(file_desc, dir_desc, pathname, flags & ~O_CLOEXEC, mode,
+    errcode = regularfile_openat(file_desc, dir_desc, resolved ? resolved : pathname,
+                                 flags & ~O_CLOEXEC, mode,
                                  process_getWorkingDir(rustsyscallhandler_getProcess(sys)));
 
     if (errcode < 0) {
         /* This will unref/free the RegularFile. */
         legacyfile_close((LegacyFile*)file_desc, rustsyscallhandler_getHost(sys));
         legacyfile_unref(file_desc);
+        free(resolved);
         return syscallreturn_makeDoneErrno(-errcode);
     }
 
     utility_debugAssert(errcode == 0);
     Descriptor* desc = descriptor_fromLegacyFile((LegacyFile*)file_desc, flags & O_CLOEXEC);
     int handle = thread_registerDescriptor(rustsyscallhandler_getThread(sys), desc);
+    free(resolved);
     return syscallreturn_makeDoneI64(handle);
 }
 
@@ -171,10 +209,13 @@ SyscallReturn syscallhandler_newfstatat(SyscallHandler* sys, const SyscallArgs* 
         return syscallreturn_makeDoneErrno(EFAULT);
     }
 
+    char* resolved = _chrootResolvePath(sys, pathname);
     const char* plugin_cwd = process_getWorkingDir(rustsyscallhandler_getProcess(sys));
 
-    return syscallreturn_makeDoneI64(
-        regularfile_fstatat(dir_desc, pathname, buf, flags, plugin_cwd));
+    SyscallReturn rv = syscallreturn_makeDoneI64(
+        regularfile_fstatat(dir_desc, resolved ? resolved : pathname, buf, flags, plugin_cwd));
+    free(resolved);
+    return rv;
 }
 
 SyscallReturn syscallhandler_fchownat(SyscallHandler* sys, const SyscallArgs* args) {
@@ -194,10 +235,13 @@ SyscallReturn syscallhandler_fchownat(SyscallHandler* sys, const SyscallArgs* ar
         return syscallreturn_makeDoneErrno(-errcode);
     }
 
+    char* resolved = _chrootResolvePath(sys, pathname);
     const char* plugin_cwd = process_getWorkingDir(rustsyscallhandler_getProcess(sys));
 
-    return syscallreturn_makeDoneI64(
-        regularfile_fchownat(dir_desc, pathname, owner, group, flags, plugin_cwd));
+    SyscallReturn rv = syscallreturn_makeDoneI64(
+        regularfile_fchownat(dir_desc, resolved ? resolved : pathname, owner, group, flags, plugin_cwd));
+    free(resolved);
+    return rv;
 }
 
 SyscallReturn syscallhandler_fchmodat(SyscallHandler* sys, const SyscallArgs* args) {
@@ -215,10 +259,13 @@ SyscallReturn syscallhandler_fchmodat(SyscallHandler* sys, const SyscallArgs* ar
         return syscallreturn_makeDoneErrno(-errcode);
     }
 
+    char* resolved = _chrootResolvePath(sys, pathname);
     const char* plugin_cwd = process_getWorkingDir(rustsyscallhandler_getProcess(sys));
 
-    return syscallreturn_makeDoneI64(
-        regularfile_fchmodat(dir_desc, pathname, mode, 0, plugin_cwd));
+    SyscallReturn rv = syscallreturn_makeDoneI64(
+        regularfile_fchmodat(dir_desc, resolved ? resolved : pathname, mode, 0, plugin_cwd));
+    free(resolved);
+    return rv;
 }
 
 SyscallReturn syscallhandler_fchmodat2(SyscallHandler* sys, const SyscallArgs* args) {
@@ -237,10 +284,13 @@ SyscallReturn syscallhandler_fchmodat2(SyscallHandler* sys, const SyscallArgs* a
         return syscallreturn_makeDoneErrno(-errcode);
     }
 
+    char* resolved = _chrootResolvePath(sys, pathname);
     const char* plugin_cwd = process_getWorkingDir(rustsyscallhandler_getProcess(sys));
 
-    return syscallreturn_makeDoneI64(
-        regularfile_fchmodat(dir_desc, pathname, mode, flags, plugin_cwd));
+    SyscallReturn rv = syscallreturn_makeDoneI64(
+        regularfile_fchmodat(dir_desc, resolved ? resolved : pathname, mode, flags, plugin_cwd));
+    free(resolved);
+    return rv;
 }
 
 SyscallReturn syscallhandler_futimesat(SyscallHandler* sys, const SyscallArgs* args) {
@@ -264,9 +314,13 @@ SyscallReturn syscallhandler_futimesat(SyscallHandler* sys, const SyscallArgs* a
         return syscallreturn_makeDoneErrno(EFAULT);
     }
 
+    char* resolved = _chrootResolvePath(sys, pathname);
     const char* plugin_cwd = process_getWorkingDir(rustsyscallhandler_getProcess(sys));
 
-    return syscallreturn_makeDoneI64(regularfile_futimesat(dir_desc, pathname, times, plugin_cwd));
+    SyscallReturn rv = syscallreturn_makeDoneI64(
+        regularfile_futimesat(dir_desc, resolved ? resolved : pathname, times, plugin_cwd));
+    free(resolved);
+    return rv;
 }
 
 SyscallReturn syscallhandler_utimensat(SyscallHandler* sys, const SyscallArgs* args) {
@@ -291,10 +345,13 @@ SyscallReturn syscallhandler_utimensat(SyscallHandler* sys, const SyscallArgs* a
         return syscallreturn_makeDoneErrno(EFAULT);
     }
 
+    char* resolved = _chrootResolvePath(sys, pathname);
     const char* plugin_cwd = process_getWorkingDir(rustsyscallhandler_getProcess(sys));
 
-    return syscallreturn_makeDoneI64(
-        regularfile_utimensat(dir_desc, pathname, times, flags, plugin_cwd));
+    SyscallReturn rv = syscallreturn_makeDoneI64(
+        regularfile_utimensat(dir_desc, resolved ? resolved : pathname, times, flags, plugin_cwd));
+    free(resolved);
+    return rv;
 }
 
 SyscallReturn syscallhandler_faccessat(SyscallHandler* sys, const SyscallArgs* args) {
@@ -312,10 +369,13 @@ SyscallReturn syscallhandler_faccessat(SyscallHandler* sys, const SyscallArgs* a
         return syscallreturn_makeDoneErrno(-errcode);
     }
 
+    char* resolved = _chrootResolvePath(sys, pathname);
     const char* plugin_cwd = process_getWorkingDir(rustsyscallhandler_getProcess(sys));
 
-    return syscallreturn_makeDoneI64(
-        regularfile_faccessat(dir_desc, pathname, mode, 0, plugin_cwd));
+    SyscallReturn rv = syscallreturn_makeDoneI64(
+        regularfile_faccessat(dir_desc, resolved ? resolved : pathname, mode, 0, plugin_cwd));
+    free(resolved);
+    return rv;
 }
 
 SyscallReturn syscallhandler_faccessat2(SyscallHandler* sys, const SyscallArgs* args) {
@@ -334,10 +394,13 @@ SyscallReturn syscallhandler_faccessat2(SyscallHandler* sys, const SyscallArgs* 
         return syscallreturn_makeDoneErrno(-errcode);
     }
 
+    char* resolved = _chrootResolvePath(sys, pathname);
     const char* plugin_cwd = process_getWorkingDir(rustsyscallhandler_getProcess(sys));
 
-    return syscallreturn_makeDoneI64(
-        regularfile_faccessat(dir_desc, pathname, mode, flags, plugin_cwd));
+    SyscallReturn rv = syscallreturn_makeDoneI64(
+        regularfile_faccessat(dir_desc, resolved ? resolved : pathname, mode, flags, plugin_cwd));
+    free(resolved);
+    return rv;
 }
 
 SyscallReturn syscallhandler_mkdirat(SyscallHandler* sys, const SyscallArgs* args) {
@@ -355,9 +418,13 @@ SyscallReturn syscallhandler_mkdirat(SyscallHandler* sys, const SyscallArgs* arg
         return syscallreturn_makeDoneErrno(-errcode);
     }
 
+    char* resolved = _chrootResolvePath(sys, pathname);
     const char* plugin_cwd = process_getWorkingDir(rustsyscallhandler_getProcess(sys));
 
-    return syscallreturn_makeDoneI64(regularfile_mkdirat(dir_desc, pathname, mode, plugin_cwd));
+    SyscallReturn rv = syscallreturn_makeDoneI64(
+        regularfile_mkdirat(dir_desc, resolved ? resolved : pathname, mode, plugin_cwd));
+    free(resolved);
+    return rv;
 }
 
 SyscallReturn syscallhandler_mknodat(SyscallHandler* sys, const SyscallArgs* args) {
@@ -376,10 +443,13 @@ SyscallReturn syscallhandler_mknodat(SyscallHandler* sys, const SyscallArgs* arg
         return syscallreturn_makeDoneErrno(-errcode);
     }
 
+    char* resolved = _chrootResolvePath(sys, pathname);
     const char* plugin_cwd = process_getWorkingDir(rustsyscallhandler_getProcess(sys));
 
-    return syscallreturn_makeDoneI64(
-        regularfile_mknodat(dir_desc, pathname, mode, dev, plugin_cwd));
+    SyscallReturn rv = syscallreturn_makeDoneI64(
+        regularfile_mknodat(dir_desc, resolved ? resolved : pathname, mode, dev, plugin_cwd));
+    free(resolved);
+    return rv;
 }
 
 SyscallReturn syscallhandler_linkat(SyscallHandler* sys, const SyscallArgs* args) {
@@ -408,10 +478,17 @@ SyscallReturn syscallhandler_linkat(SyscallHandler* sys, const SyscallArgs* args
         return syscallreturn_makeDoneErrno(-errcode);
     }
 
+    char* resolvedOld = _chrootResolvePath(sys, oldpath);
+    char* resolvedNew = _chrootResolvePath(sys, newpath);
     const char* plugin_cwd = process_getWorkingDir(rustsyscallhandler_getProcess(sys));
 
-    return syscallreturn_makeDoneI64(
-        regularfile_linkat(olddir_desc, oldpath, newdir_desc, newpath, flags, plugin_cwd));
+    SyscallReturn rv = syscallreturn_makeDoneI64(
+        regularfile_linkat(olddir_desc, resolvedOld ? resolvedOld : oldpath,
+                           newdir_desc, resolvedNew ? resolvedNew : newpath,
+                           flags, plugin_cwd));
+    free(resolvedOld);
+    free(resolvedNew);
+    return rv;
 }
 
 SyscallReturn syscallhandler_unlinkat(SyscallHandler* sys, const SyscallArgs* args) {
@@ -429,9 +506,13 @@ SyscallReturn syscallhandler_unlinkat(SyscallHandler* sys, const SyscallArgs* ar
         return syscallreturn_makeDoneErrno(-errcode);
     }
 
+    char* resolved = _chrootResolvePath(sys, pathname);
     const char* plugin_cwd = process_getWorkingDir(rustsyscallhandler_getProcess(sys));
 
-    return syscallreturn_makeDoneI64(regularfile_unlinkat(dir_desc, pathname, flags, plugin_cwd));
+    SyscallReturn rv = syscallreturn_makeDoneI64(
+        regularfile_unlinkat(dir_desc, resolved ? resolved : pathname, flags, plugin_cwd));
+    free(resolved);
+    return rv;
 }
 
 SyscallReturn syscallhandler_symlinkat(SyscallHandler* sys, const SyscallArgs* args) {
@@ -457,10 +538,13 @@ SyscallReturn syscallhandler_symlinkat(SyscallHandler* sys, const SyscallArgs* a
         return syscallreturn_makeDoneErrno(-errcode);
     }
 
+    char* resolved = _chrootResolvePath(sys, linkpath);
     const char* plugin_cwd = process_getWorkingDir(rustsyscallhandler_getProcess(sys));
 
-    return syscallreturn_makeDoneI64(
-        regularfile_symlinkat(dir_desc, linkpath, targetpath, plugin_cwd));
+    SyscallReturn rv = syscallreturn_makeDoneI64(
+        regularfile_symlinkat(dir_desc, resolved ? resolved : linkpath, targetpath, plugin_cwd));
+    free(resolved);
+    return rv;
 }
 
 SyscallReturn syscallhandler_readlinkat(SyscallHandler* sys, const SyscallArgs* args) {
@@ -492,10 +576,13 @@ SyscallReturn syscallhandler_readlinkat(SyscallHandler* sys, const SyscallArgs* 
         return syscallreturn_makeDoneErrno(EFAULT);
     }
 
+    char* resolved = _chrootResolvePath(sys, pathname);
     const char* plugin_cwd = process_getWorkingDir(rustsyscallhandler_getProcess(sys));
 
-    return syscallreturn_makeDoneI64(
-        regularfile_readlinkat(dir_desc, pathname, buf, bufSize, plugin_cwd));
+    SyscallReturn rv = syscallreturn_makeDoneI64(
+        regularfile_readlinkat(dir_desc, resolved ? resolved : pathname, buf, bufSize, plugin_cwd));
+    free(resolved);
+    return rv;
 }
 
 SyscallReturn syscallhandler_renameat(SyscallHandler* sys, const SyscallArgs* args) {
@@ -542,9 +629,12 @@ SyscallReturn syscallhandler_statx(SyscallHandler* sys, const SyscallArgs* args)
         return syscallreturn_makeDoneErrno(EFAULT);
     }
 
+    char* resolved = _chrootResolvePath(sys, pathname);
     const char* plugin_cwd = process_getWorkingDir(rustsyscallhandler_getProcess(sys));
 
-    return syscallreturn_makeDoneI64(
-        regularfile_statx(dir_desc, pathname, flags, mask, statxbuf, plugin_cwd));
+    SyscallReturn rv = syscallreturn_makeDoneI64(
+        regularfile_statx(dir_desc, resolved ? resolved : pathname, flags, mask, statxbuf, plugin_cwd));
+    free(resolved);
+    return rv;
 }
 #endif
