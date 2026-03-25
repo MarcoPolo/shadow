@@ -371,6 +371,7 @@ impl Host {
         envv: Vec<CString>,
         pause_for_debugging: bool,
         expected_final_state: ProcessFinalState,
+        overlay_dir: Option<CString>,
     ) {
         debug_assert!(shutdown_time.is_none() || shutdown_time.unwrap() > start_time);
 
@@ -391,6 +392,7 @@ impl Host {
                 pause_for_debugging,
                 host.params.strace_logging_options,
                 expected_final_state,
+                overlay_dir.clone(),
             )
             .unwrap_or_else(|e| panic!("Failed to initialize application {plugin_name:?}: {e:?}"));
             let (process_id, thread_id) = {

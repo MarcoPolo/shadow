@@ -539,6 +539,40 @@ impl SyscallHandler {
                 )
             }
             //
+            // PATH SYSCALLS THAT NEED OVERLAY REDIRECTION
+            //
+            // When overlay_dir is set, redirect stat/lstat/access to their *at
+            // equivalents which go through _overlayResolvePath in the C handlers.
+            // When overlay_dir is not set, these fall through to native handling.
+            //
+            SyscallNum::NR_stat if ctx.objs.process.overlay_dir().is_some() => {
+                // stat(path, buf) → newfstatat(AT_FDCWD, path, buf, 0)
+                let mut new_args = *ctx.args;
+                new_args.args[3] = SyscallReg::from(0i64); // flags = 0
+                new_args.args[2] = new_args.args[1]; // buf
+                new_args.args[1] = new_args.args[0]; // path
+                new_args.args[0] = SyscallReg::from(libc::AT_FDCWD as i64); // dirfd
+                Self::call_legacy_with_args(c::syscallhandler_newfstatat, &mut ctx, &new_args)
+            }
+            SyscallNum::NR_lstat if ctx.objs.process.overlay_dir().is_some() => {
+                // lstat(path, buf) → newfstatat(AT_FDCWD, path, buf, AT_SYMLINK_NOFOLLOW)
+                let mut new_args = *ctx.args;
+                new_args.args[3] = SyscallReg::from(libc::AT_SYMLINK_NOFOLLOW as i64);
+                new_args.args[2] = new_args.args[1]; // buf
+                new_args.args[1] = new_args.args[0]; // path
+                new_args.args[0] = SyscallReg::from(libc::AT_FDCWD as i64);
+                Self::call_legacy_with_args(c::syscallhandler_newfstatat, &mut ctx, &new_args)
+            }
+            SyscallNum::NR_access if ctx.objs.process.overlay_dir().is_some() => {
+                // access(path, mode) → faccessat(AT_FDCWD, path, mode, 0)
+                let mut new_args = *ctx.args;
+                new_args.args[3] = SyscallReg::from(0i64); // flags
+                new_args.args[2] = new_args.args[1]; // mode
+                new_args.args[1] = new_args.args[0]; // path
+                new_args.args[0] = SyscallReg::from(libc::AT_FDCWD as i64);
+                Self::call_legacy_with_args(c::syscallhandler_faccessat, &mut ctx, &new_args)
+            }
+            //
             // NATIVE LINUX-HANDLED SYSCALLS
             //
             SyscallNum::NR_access
@@ -693,6 +727,27 @@ impl SyscallHandler {
             Some(desc) => Ok(desc),
             None => Err(linux_api::errno::Errno::EBADF),
         }
+    }
+
+    /// Run a legacy C syscall handler with custom args (for syscall redirection).
+    fn call_legacy_with_args(
+        syscall: LegacySyscallFn,
+        ctx: &mut SyscallContext,
+        args: &SyscallArgs,
+    ) -> SyscallResult {
+        let rv: SyscallResult =
+            unsafe { syscall(ctx.handler as *mut SyscallHandler, std::ptr::from_ref(args)) }.into();
+
+        if rv.is_err() {
+            ctx.objs.process.free_unsafe_borrows_noflush();
+        } else {
+            ctx.objs
+                .process
+                .free_unsafe_borrows_flush()
+                .expect("flushing syscall ptrs");
+        }
+
+        rv
     }
 
     /// Run a legacy C syscall handler.

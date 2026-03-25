@@ -7,6 +7,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <stdio.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <unistd.h>
@@ -60,17 +61,35 @@ static SyscallReturn _syscallhandler_openHelper(SyscallHandler* sys, UntypedFore
         return syscallreturn_makeDoneErrno(-errcode);
     }
 
-    /* If the process has a chroot, resolve the path to the host filesystem. */
+    /* Resolve through overlay and/or chroot. */
     char* resolved = NULL;
     if (pathname && pathname[0] == '/') {
-        const char* rootDir = process_getRootDir(rustsyscallhandler_getProcess(sys));
-        if (rootDir && !(rootDir[0] == '/' && rootDir[1] == '\0')) {
-            size_t rootLen = strlen(rootDir);
-            /* Don't prepend if the path already starts with rootDir (e.g.
-             * shebang paths that the kernel already resolved to host paths). */
-            if (strncmp(pathname, rootDir, rootLen) != 0) {
-                if (asprintf(&resolved, "%s%s", rootDir, pathname) < 0) {
-                    abort();
+        const Process* proc = rustsyscallhandler_getProcess(sys);
+
+        /* Check overlay first */
+        const char* overlayDir = process_getOverlayDir(proc);
+        if (overlayDir) {
+            char* overlayPath = NULL;
+            if (asprintf(&overlayPath, "%s%s", overlayDir, pathname) < 0) {
+                abort();
+            }
+            struct stat st;
+            if (lstat(overlayPath, &st) == 0) {
+                resolved = overlayPath;
+            } else {
+                free(overlayPath);
+            }
+        }
+
+        /* Fall through to chroot if overlay didn't match */
+        if (!resolved) {
+            const char* rootDir = process_getRootDir(proc);
+            if (rootDir && !(rootDir[0] == '/' && rootDir[1] == '\0')) {
+                size_t rootLen = strlen(rootDir);
+                if (strncmp(pathname, rootDir, rootLen) != 0) {
+                    if (asprintf(&resolved, "%s%s", rootDir, pathname) < 0) {
+                        abort();
+                    }
                 }
             }
         }

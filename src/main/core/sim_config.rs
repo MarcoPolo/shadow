@@ -194,6 +194,7 @@ pub struct ProcessInfo {
     pub args: Vec<OsString>,
     pub env: BTreeMap<EnvName, String>,
     pub expected_final_state: ProcessFinalState,
+    pub overlay_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -370,6 +371,23 @@ fn build_process(proc: &ProcessOptions, config: &ConfigOptions) -> anyhow::Resul
     // set argv[0] as the user-provided expanded string, not the canonicalized version
     args.insert(0, expanded_path.into());
 
+    let overlay_dir = match &proc.overlay_dir {
+        Some(dir) => {
+            let expanded = tilde_expansion(dir.to_str().unwrap());
+            let canonical = std::path::Path::new(&expanded)
+                .canonicalize()
+                .with_context(|| format!("Failed to canonicalize overlay_dir '{}'", expanded.display()))?;
+            if !canonical.is_dir() {
+                return Err(anyhow::anyhow!(
+                    "overlay_dir '{}' is not a directory",
+                    canonical.display()
+                ));
+            }
+            Some(canonical)
+        }
+        None => None,
+    };
+
     Ok(ProcessInfo {
         plugin: canonical_path,
         start_time,
@@ -378,6 +396,7 @@ fn build_process(proc: &ProcessOptions, config: &ConfigOptions) -> anyhow::Resul
         args,
         env: proc.environment.clone(),
         expected_final_state: proc.expected_final_state,
+        overlay_dir,
     })
 }
 

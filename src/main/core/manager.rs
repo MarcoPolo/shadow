@@ -694,6 +694,10 @@ impl<'a> Manager<'a> {
 
             host.continue_execution_timer();
 
+            let overlay_dir = proc.overlay_dir.as_ref().map(|p| {
+                CString::new(p.as_os_str().as_encoded_bytes()).unwrap()
+            });
+
             host.add_application(
                 proc.start_time,
                 proc.shutdown_time,
@@ -704,6 +708,7 @@ impl<'a> Manager<'a> {
                 envv,
                 pause_for_debugging,
                 proc.expected_final_state,
+                overlay_dir,
             );
 
             host.stop_execution_timer();

@@ -712,6 +712,14 @@ pub struct ProcessOptions {
     /// if the actual state doesn't match.
     #[serde(default)]
     pub expected_final_state: ProcessFinalState,
+
+    /// A directory whose contents overlay the root filesystem for this process.
+    /// When the process accesses an absolute path like `/foo/bar`, Shadow first
+    /// checks `<overlay_dir>/foo/bar`; if it exists, that path is used instead.
+    /// This is a read-only overlay for file injection (e.g., custom shared
+    /// libraries, config files).
+    #[serde(default)]
+    pub overlay_dir: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

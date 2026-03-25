@@ -732,11 +732,29 @@ impl SyscallHandler {
             abs_path = path;
         }
 
+        // If the process has an overlay_dir, check if the binary exists there.
+        let _overlay_path_storage: Option<CString>;
+        let abs_path = if let Some(overlay_dir) = ctx.objs.process.overlay_dir() {
+            let mut overlay = overlay_dir.to_bytes().to_vec();
+            overlay.extend_from_slice(abs_path.to_bytes_with_nul());
+            let overlay_cstr = CString::from_vec_with_nul(overlay).unwrap();
+            if std::fs::symlink_metadata(overlay_cstr.to_str().unwrap_or("")).is_ok() {
+                _overlay_path_storage = Some(overlay_cstr);
+                _overlay_path_storage.as_ref().unwrap().as_c_str()
+            } else {
+                _overlay_path_storage = None;
+                abs_path
+            }
+        } else {
+            _overlay_path_storage = None;
+            abs_path
+        };
+
         // If the process has a chroot, prepend the root dir to the path so
         // that Shadow's host-side file operations (verify_plugin_path,
         // posix_spawn) resolve the binary inside the chroot.
         let _chroot_path_storage: Option<CString>;
-        let abs_path = {
+        let abs_path = if _overlay_path_storage.is_none() {
             let root_dir = ctx.objs.process.root_dir();
             let root_dir_bytes = root_dir.to_bytes();
             if root_dir_bytes != b"/" {
@@ -750,6 +768,9 @@ impl SyscallHandler {
                 _chroot_path_storage = None;
                 abs_path
             }
+        } else {
+            _chroot_path_storage = None;
+            abs_path
         };
 
         // TODO: canonicalize? On one hand that would improve caching behavior
@@ -1015,21 +1036,10 @@ impl SyscallHandler {
         /* path */ SyscallStringArg,
     );
     pub fn chroot(
-        ctx: &mut SyscallContext,
-        path: ForeignPtr<std::ffi::c_char>,
+        _ctx: &mut SyscallContext,
+        _path: ForeignPtr<std::ffi::c_char>,
     ) -> Result<(), SyscallError> {
-        // Execute the native chroot, propagating any failures.
-        let (process, thread) = ctx.objs.split_thread();
-        thread.native_chroot(&process, path)?;
-
-        // Update our internal copy of the root dir using /proc/<pid>/root.
-        let procpath = format!("/proc/{}/root", thread.native_tid().as_raw_nonzero().get());
-        let newroot = std::fs::read_link(&procpath)
-            .unwrap_or_else(|e| panic!("Couldn't find new root {procpath}: {e:?}"));
-        let mut newroot = newroot.into_os_string().into_vec();
-        newroot.push(0);
-        let newroot = CString::from_vec_with_nul(newroot).unwrap();
-        process.process.set_root_dir(newroot);
-        Ok(())
+        // chroot is not supported; use overlay_dir config option instead.
+        Err(Errno::EPERM.into())
     }
 }

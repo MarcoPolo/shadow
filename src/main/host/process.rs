@@ -169,6 +169,10 @@ struct Common {
     // This must remain in sync with the actual root dir of the native process.
     root_dir: CString,
 
+    // Optional overlay directory for file injection. When set, absolute path
+    // lookups check <overlay_dir>/<path> first before the real filesystem.
+    overlay_dir: Option<CString>,
+
     // (emulated) Process-wide resource limits. We don't enforce these, but track
     // what they are so that we can return the expected value for e.g. `getrlimit`.
     rlimits: [linux_api::resource::rlimit64; linux_api::resource::RLIM_NLIMITS as usize],
@@ -627,6 +631,7 @@ impl RunnableProcess {
             plugin_name,
             working_dir: self.common.working_dir.clone(),
             root_dir: self.common.root_dir.clone(),
+            overlay_dir: self.common.overlay_dir.clone(),
             parent_pid: Cell::new(parent_pid),
             group_id: Cell::new(process_group_id),
             session_id: Cell::new(session_id),
@@ -960,6 +965,7 @@ impl Process {
         pause_for_debugging: bool,
         strace_logging_options: Option<FmtOptions>,
         expected_final_state: ProcessFinalState,
+        overlay_dir: Option<CString>,
     ) -> Result<RootedRc<RootedRefCell<Process>>, Errno> {
         debug!("starting process '{plugin_name:?}'");
 
@@ -1116,6 +1122,7 @@ impl Process {
             host_id: host.id(),
             working_dir,
             root_dir: CString::new("/").unwrap(),
+            overlay_dir,
             name,
             plugin_name,
             parent_pid: Cell::new(ProcessId::INIT),
@@ -1765,6 +1772,15 @@ impl Process {
         self.common_mut().root_dir = path;
     }
 
+    pub fn overlay_dir(&self) -> Option<impl Deref<Target = CString> + '_> {
+        let common = self.common();
+        if common.overlay_dir.is_some() {
+            Some(Ref::map(common, |c| c.overlay_dir.as_ref().unwrap()))
+        } else {
+            None
+        }
+    }
+
     /// Update `self` to complete an `exec` syscall from thread `tid`, replacing
     /// the running managed process with `mthread`.
     pub fn update_for_exec(&mut self, host: &Host, tid: ThreadId, mthread: ManagedThread) {
@@ -2278,6 +2294,16 @@ mod export {
     pub unsafe extern "C-unwind" fn process_getRootDir(proc: *const Process) -> *const c_char {
         let proc = unsafe { proc.as_ref().unwrap() };
         proc.common().root_dir.as_ptr()
+    }
+
+    /// Returns the overlay directory path, or NULL if none is set.
+    #[unsafe(no_mangle)]
+    pub unsafe extern "C-unwind" fn process_getOverlayDir(proc: *const Process) -> *const c_char {
+        let proc = unsafe { proc.as_ref().unwrap() };
+        match &proc.common().overlay_dir {
+            Some(dir) => dir.as_ptr(),
+            None => std::ptr::null(),
+        }
     }
 
     #[unsafe(no_mangle)]
